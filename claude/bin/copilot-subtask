@@ -6,6 +6,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -15,6 +16,7 @@ DEFAULT_CONFIG = {
     "launchStrategy": "capture",
     "copilotModel": "gpt-5.4",
     "minPromptLength": 24,
+    "captureTimeout": 900,
 }
 
 TERMINALS = [
@@ -29,13 +31,28 @@ TERMINALS = [
 ]
 
 
-def project_dir() -> Path:
-    value = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+def project_dir(override: str | None = None) -> Path:
+    value = override or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     return Path(value).resolve()
 
 
 def user_claude_dir() -> Path:
     return Path.home() / ".claude"
+
+
+def load_claude_md(root: Path) -> str | None:
+    """Auto-discover CLAUDE.md files in the project and return their content."""
+    candidates = [
+        root / "CLAUDE.md",
+        root / ".claude" / "CLAUDE.md",
+    ]
+    parts = []
+    for path in candidates:
+        if path.is_file():
+            content = path.read_text().strip()
+            if content:
+                parts.append(f"# From {path.relative_to(root)}\n{content}")
+    return "\n\n".join(parts) if parts else None
 
 
 def load_config(root: Path) -> dict:
@@ -61,23 +78,43 @@ def read_prompt(args: argparse.Namespace) -> str:
     return prompt
 
 
-def wrap_prompt(prompt: str) -> str:
-    return (
-        "You are handling a delegated subtask from Claude Code.\n"
-        "Stay scoped to exploration, debugging, review, or investigation work unless the prompt explicitly asks for edits.\n"
+def wrap_prompt(prompt: str, allow_edits: bool = False, context: str | None = None) -> str:
+    if allow_edits:
+        preamble = (
+            "You are handling a delegated subtask from Claude Code.\n"
+            "You may read, create, and edit files as needed to complete the task.\n"
+            "Read existing code first to match the project's style and conventions.\n"
+            "Thoroughly explore the relevant codebase to understand context before making changes.\n"
+        )
+    else:
+        preamble = (
+            "You are handling a delegated subtask from Claude Code.\n"
+            "Stay scoped to exploration, debugging, review, or investigation work unless the prompt explicitly asks for edits.\n"
+            "Thoroughly explore the relevant codebase to answer the question completely.\n"
+        )
+
+    response_guide = (
         "Work silently. Do not narrate your process, thinking, or intermediate steps.\n"
-        "Return only the final result, in at most 5 short bullets or a short paragraph.\n"
-        "Include only findings, likely root cause if relevant, affected files or commands, and next steps.\n\n"
-        f"Delegated task:\n{prompt}"
+        "Your response will be fed back to Claude Code. Keep it concise:\n"
+        "- For exploration: at most 5 short bullets or a short paragraph with findings.\n"
+        "- For implementation: list the files you created/modified and a brief summary of changes.\n"
+        "Do not dump full file trees or large code blocks in your response.\n"
     )
 
+    parts = [preamble, response_guide]
+    if context:
+        parts.append(f"\nProject context:\n{context}\n")
+    parts.append(f"\nDelegated task:\n{prompt}")
 
-def copilot_command(root: Path, prompt: str, config: dict) -> list[str]:
+    return "".join(parts)
+
+
+def copilot_command(root: Path, prompt: str, config: dict, allow_edits: bool = False, context: str | None = None) -> list[str]:
     command = ["copilot", "--add-dir", str(root)]
     model = str(config.get("copilotModel", "")).strip()
     if model:
         command.extend(["--model", model])
-    command.extend(["-i", wrap_prompt(prompt)])
+    command.extend(["-i", wrap_prompt(prompt, allow_edits=allow_edits, context=context)])
     return command
 
 
@@ -97,6 +134,33 @@ def terminal_command(copilot_args: list[str], root: Path) -> list[str] | None:
     return None
 
 
+def run_capture(capture_args: list[str], root: Path, timeout: int) -> int:
+    os.chdir(root)
+    try:
+        result = subprocess.run(
+            capture_args,
+            timeout=timeout,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"Copilot timed out after {timeout}s.", file=sys.stderr)
+        return 1
+
+    if result.stdout:
+        print(result.stdout, end="")
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            print(f"\n[copilot-subtask error (exit {result.returncode})]: {stderr}", file=sys.stderr)
+        elif not result.stdout:
+            print(f"Copilot exited with code {result.returncode} and no output.", file=sys.stderr)
+
+    return result.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Launch a delegated Copilot subtask.")
     parser.add_argument("--prompt", help="Prompt text for Copilot.")
@@ -104,12 +168,27 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print the chosen launch command without executing it.")
     parser.add_argument("--inline", action="store_true", help="Run Copilot in the current terminal.")
     parser.add_argument("--capture-result", action="store_true", help="Run Copilot non-interactively and print only the final result.")
+    parser.add_argument("--allow-edits", action="store_true", help="Allow Copilot to create and edit files (for implementation tasks).")
+    parser.add_argument("--cwd", help="Override the working directory / project root.")
+    parser.add_argument("--context", help="Extra project context to prepend (tech stack, conventions, etc).")
+    parser.add_argument("--timeout", type=int, help="Timeout in seconds for capture mode (default: from config or 300).")
     args = parser.parse_args()
 
-    root = project_dir()
+    root = project_dir(args.cwd)
     config = load_config(root)
     prompt = read_prompt(args)
-    copilot_args = copilot_command(root, prompt, config)
+    timeout = args.timeout or int(config.get("captureTimeout", 300))
+
+    # Build context: CLAUDE.md auto-discovery + explicit --context
+    context_parts = []
+    claude_md = load_claude_md(root)
+    if claude_md:
+        context_parts.append(claude_md)
+    if args.context:
+        context_parts.append(args.context)
+    context = "\n\n".join(context_parts) if context_parts else None
+
+    copilot_args = copilot_command(root, prompt, config, allow_edits=args.allow_edits, context=context)
 
     if args.capture_result:
         capture_args = copilot_args[:]
@@ -119,7 +198,6 @@ def main() -> int:
             [
                 prompt_text,
                 "--allow-all",
-                "--no-custom-instructions",
                 "--stream",
                 "off",
                 "--output-format",
@@ -128,10 +206,9 @@ def main() -> int:
             ]
         )
         if args.dry_run:
-            print(json.dumps({"cwd": str(root), "copilot_args": capture_args}, indent=2))
+            print(json.dumps({"cwd": str(root), "copilot_args": capture_args, "timeout": timeout}, indent=2))
             return 0
-        os.chdir(root)
-        return subprocess.call(capture_args)
+        return run_capture(capture_args, root, timeout)
 
     terminal_args = None if args.inline else terminal_command(copilot_args, root)
     if args.dry_run:
