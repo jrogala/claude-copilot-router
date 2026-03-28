@@ -14,7 +14,6 @@ DEFAULT_CONFIG = {
     "launchStrategy": "capture",
     "copilotModel": "gpt-5.4",
     "minPromptLength": 24,
-    "captureTimeout": 900,
 }
 
 # Intent patterns: what kind of work the user wants
@@ -143,22 +142,18 @@ def build_routing_context(matches: list[str], launcher: Path) -> str:
     )
 
 
-def auto_route(prompt: str, root: Path, timeout: int) -> tuple[bool, str]:
+def auto_route(prompt: str, root: Path) -> tuple[bool, str]:
     launcher = launcher_path(root)
     if not launcher.exists():
         return False, "Launcher script is missing."
-    try:
-        result = subprocess.run(
-            [str(launcher), "--stdin-prompt", "--capture-result"],
-            input=prompt,
-            text=True,
-            capture_output=True,
-            cwd=root,
-            check=False,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"Copilot timed out after {timeout}s."
+    result = subprocess.run(
+        [str(launcher), "--stdin-prompt", "--capture-result"],
+        input=prompt,
+        text=True,
+        capture_output=True,
+        cwd=root,
+        check=False,
+    )
     details = (result.stdout or result.stderr).strip()
     return result.returncode == 0, details or "No launcher output."
 
@@ -198,11 +193,9 @@ def main() -> int:
         emit(standing)
         return 0
 
-    timeout = int(config.get("captureTimeout", 300))
-
     # Auto mode: run copilot immediately
     if mode == "on":
-        launched, details = auto_route(prompt, root, timeout)
+        launched, details = auto_route(prompt, root)
         if launched and config.get("blockOnAutoRoute", True):
             emit(
                 "Copilot router handled this prompt externally. "

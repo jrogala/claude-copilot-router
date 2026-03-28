@@ -79,8 +79,6 @@ Recommended behavior:
 ~/.claude/bin/copilot-subtask --prompt "Add a sky planner page" --capture-result --allow-edits \
   --context "Python FastAPI + Jinja2, templates in src/app/templates/"
 
-# Custom timeout (default: 300s)
-~/.claude/bin/copilot-subtask --prompt "Full security audit" --capture-result --timeout 600
 ```
 
 ## Flags
@@ -93,7 +91,6 @@ Recommended behavior:
 | `--allow-edits` | Allow Copilot to create/edit files |
 | `--cwd PATH` | Override working directory / project root |
 | `--context TEXT` | Extra project context prepended to the prompt |
-| `--timeout SECS` | Timeout for capture mode (default: config or 900s) |
 | `--inline` | Run Copilot in the current terminal |
 | `--dry-run` | Print the launch command without executing |
 
@@ -107,8 +104,7 @@ Recommended behavior:
   "blockOnAutoRoute": true,
   "launchStrategy": "capture",
   "copilotModel": "gpt-5.4",
-  "minPromptLength": 24,
-  "captureTimeout": 900
+  "minPromptLength": 24
 }
 ```
 

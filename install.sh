@@ -69,7 +69,6 @@ default_config = {
     "launchStrategy": "capture",
     "copilotModel": os.environ["MODEL"],
     "minPromptLength": 24,
-    "captureTimeout": 900,
 }
 
 # Merge: keep existing user config, only add missing keys

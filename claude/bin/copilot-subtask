@@ -16,7 +16,6 @@ DEFAULT_CONFIG = {
     "launchStrategy": "capture",
     "copilotModel": "gpt-5.4",
     "minPromptLength": 24,
-    "captureTimeout": 900,
 }
 
 TERMINALS = [
@@ -134,31 +133,49 @@ def terminal_command(copilot_args: list[str], root: Path) -> list[str] | None:
     return None
 
 
-def run_capture(capture_args: list[str], root: Path, timeout: int) -> int:
+def run_capture(capture_args: list[str], root: Path) -> int:
     os.chdir(root)
-    try:
-        result = subprocess.run(
-            capture_args,
-            timeout=timeout,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"Copilot timed out after {timeout}s.", file=sys.stderr)
-        return 1
+    proc = subprocess.Popen(
+        capture_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
-    if result.stdout:
-        print(result.stdout, end="")
+    # Stream stderr to show progress while capturing stdout for the result
+    stdout_chunks = []
 
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        if stderr:
-            print(f"\n[copilot-subtask error (exit {result.returncode})]: {stderr}", file=sys.stderr)
-        elif not result.stdout:
-            print(f"Copilot exited with code {result.returncode} and no output.", file=sys.stderr)
+    import selectors
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    sel.register(proc.stderr, selectors.EVENT_READ)
 
-    return result.returncode
+    open_streams = 2
+    while open_streams > 0:
+        for key, _ in sel.select():
+            line = key.fileobj.readline()
+            if not line:
+                sel.unregister(key.fileobj)
+                open_streams -= 1
+                continue
+            if key.fileobj is proc.stdout:
+                stdout_chunks.append(line)
+            else:
+                # Show copilot progress on stderr in real-time
+                sys.stderr.write(line)
+                sys.stderr.flush()
+
+    sel.close()
+    proc.wait()
+
+    stdout = "".join(stdout_chunks)
+    if stdout:
+        print(stdout, end="")
+
+    if proc.returncode != 0 and not stdout:
+        print(f"Copilot exited with code {proc.returncode} and no output.", file=sys.stderr)
+
+    return proc.returncode
 
 
 def main() -> int:
@@ -171,13 +188,11 @@ def main() -> int:
     parser.add_argument("--allow-edits", action="store_true", help="Allow Copilot to create and edit files (for implementation tasks).")
     parser.add_argument("--cwd", help="Override the working directory / project root.")
     parser.add_argument("--context", help="Extra project context to prepend (tech stack, conventions, etc).")
-    parser.add_argument("--timeout", type=int, help="Timeout in seconds for capture mode (default: from config or 300).")
     args = parser.parse_args()
 
     root = project_dir(args.cwd)
     config = load_config(root)
     prompt = read_prompt(args)
-    timeout = args.timeout or int(config.get("captureTimeout", 300))
 
     # Build context: CLAUDE.md auto-discovery + explicit --context
     context_parts = []
@@ -206,9 +221,9 @@ def main() -> int:
             ]
         )
         if args.dry_run:
-            print(json.dumps({"cwd": str(root), "copilot_args": capture_args, "timeout": timeout}, indent=2))
+            print(json.dumps({"cwd": str(root), "copilot_args": capture_args}, indent=2))
             return 0
-        return run_capture(capture_args, root, timeout)
+        return run_capture(capture_args, root)
 
     terminal_args = None if args.inline else terminal_command(copilot_args, root)
     if args.dry_run:
