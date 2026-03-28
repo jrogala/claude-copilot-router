@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="${HOME}/.claude"
 MODE="ask"
 MODEL="gpt-5.4"
+MODE_SET=""
+MODEL_SET=""
 
 usage() {
   cat <<'EOF'
@@ -16,10 +18,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)
       MODE="$2"
+      MODE_SET=1
       shift 2
       ;;
     --model)
       MODEL="$2"
+      MODEL_SET=1
       shift 2
       ;;
     -h|--help)
@@ -49,7 +53,7 @@ cp "${ROOT_DIR}/claude/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-subtask"
 cp "${ROOT_DIR}/claude/bin/copilot-router-mode" "${TARGET_DIR}/bin/copilot-router-mode"
 chmod +x "${TARGET_DIR}/hooks/copilot_router_hook.py" "${TARGET_DIR}/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-router-mode"
 
-export TARGET_DIR MODE MODEL
+export TARGET_DIR MODE MODEL _MODE_SET="${MODE_SET}" _MODEL_SET="${MODEL_SET}"
 python3 <<'PY'
 import json
 import os
@@ -65,9 +69,25 @@ default_config = {
     "launchStrategy": "capture",
     "copilotModel": os.environ["MODEL"],
     "minPromptLength": 24,
+    "captureTimeout": 900,
 }
 
-config_path.write_text(json.dumps(default_config, indent=2) + "\n")
+# Merge: keep existing user config, only add missing keys
+if config_path.exists():
+    try:
+        existing = json.loads(config_path.read_text())
+    except json.JSONDecodeError:
+        existing = {}
+    merged = {**default_config, **existing}
+    if os.environ.get("_MODE_SET"):
+        merged["mode"] = os.environ["MODE"]
+    if os.environ.get("_MODEL_SET"):
+        merged["copilotModel"] = os.environ["MODEL"]
+    config_path.write_text(json.dumps(merged, indent=2) + "\n")
+    print(f"  Updated config (preserved existing values)")
+else:
+    config_path.write_text(json.dumps(default_config, indent=2) + "\n")
+    print(f"  Created config")
 
 if settings_path.exists():
     settings = json.loads(settings_path.read_text())
@@ -93,7 +113,9 @@ if hook_entry not in user_prompt_submit:
 settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 PY
 
+echo ""
 echo "Installed claude-copilot-router into ${TARGET_DIR}"
-echo "Mode: ${MODE}"
-echo "Model: ${MODEL}"
+echo "  Mode:  ${MODE}"
+echo "  Model: ${MODEL}"
+echo ""
 echo "Restart Claude Code if your current session does not pick up the hook automatically."

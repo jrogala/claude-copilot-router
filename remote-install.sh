@@ -7,11 +7,13 @@ BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 TARGET_DIR="${HOME}/.claude"
 MODE="ask"
 MODEL="gpt-5.4"
+MODE_SET=""
+MODEL_SET=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode) MODE="$2"; shift 2 ;;
-    --model) MODEL="$2"; shift 2 ;;
+    --mode) MODE="$2"; MODE_SET=1; shift 2 ;;
+    --model) MODEL="$2"; MODEL_SET=1; shift 2 ;;
     -h|--help)
       echo "Usage: curl -fsSL <url> | bash -s -- [--mode off|ask|on] [--model MODEL]"
       exit 0
@@ -33,7 +35,7 @@ curl -fsSL "${BASE_URL}/claude/bin/copilot-subtask"          -o "${TARGET_DIR}/b
 curl -fsSL "${BASE_URL}/claude/bin/copilot-router-mode"      -o "${TARGET_DIR}/bin/copilot-router-mode"
 chmod +x "${TARGET_DIR}/hooks/copilot_router_hook.py" "${TARGET_DIR}/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-router-mode"
 
-export TARGET_DIR MODE MODEL
+export TARGET_DIR MODE MODEL _MODE_SET="${MODE_SET}" _MODEL_SET="${MODEL_SET}"
 python3 <<'PY'
 import json
 import os
@@ -52,7 +54,23 @@ default_config = {
     "captureTimeout": 900,
 }
 
-config_path.write_text(json.dumps(default_config, indent=2) + "\n")
+# Merge: keep existing user config, only add missing keys
+if config_path.exists():
+    try:
+        existing = json.loads(config_path.read_text())
+    except json.JSONDecodeError:
+        existing = {}
+    merged = {**default_config, **existing}
+    # Always update mode/model if explicitly passed via CLI
+    if os.environ.get("_MODE_SET"):
+        merged["mode"] = os.environ["MODE"]
+    if os.environ.get("_MODEL_SET"):
+        merged["copilotModel"] = os.environ["MODEL"]
+    config_path.write_text(json.dumps(merged, indent=2) + "\n")
+    print(f"  Updated config (preserved existing values)")
+else:
+    config_path.write_text(json.dumps(default_config, indent=2) + "\n")
+    print(f"  Created config")
 
 if settings_path.exists():
     settings = json.loads(settings_path.read_text())
