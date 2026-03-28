@@ -3,10 +3,12 @@
 import argparse
 import json
 import os
+import selectors
 import shlex
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -16,6 +18,8 @@ DEFAULT_CONFIG = {
     "launchStrategy": "capture",
     "copilotModel": "gpt-5.4",
     "minPromptLength": 24,
+    "softThreshold": 2,
+    "hardThreshold": 5,
 }
 
 TERMINALS = [
@@ -30,6 +34,8 @@ TERMINALS = [
 ]
 
 
+# --- Path helpers ---
+
 def project_dir(override: str | None = None) -> Path:
     value = override or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     return Path(value).resolve()
@@ -39,12 +45,45 @@ def user_claude_dir() -> Path:
     return Path.home() / ".claude"
 
 
+def sessions_state_path() -> Path:
+    return Path(f"/tmp/copilot-router-sessions-{os.getuid()}.json")
+
+
+def session_log_path(session_id: str) -> Path:
+    return Path(f"/tmp/copilot-router-log-{session_id}.jsonl")
+
+
+def session_pid_path(session_id: str) -> Path:
+    return Path(f"/tmp/copilot-router-pid-{session_id}")
+
+
+# --- Session state ---
+
+def load_sessions() -> dict:
+    path = sessions_state_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_session(session_id: str, cwd: str, prompt: str, pid: int | None = None) -> None:
+    sessions = load_sessions()
+    sessions[session_id] = {
+        "cwd": cwd,
+        "last_prompt": prompt[:200],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pid": pid,
+    }
+    sessions_state_path().write_text(json.dumps(sessions, indent=2) + "\n")
+
+
+# --- Config & context ---
+
 def load_claude_md(root: Path) -> str | None:
-    """Auto-discover CLAUDE.md files in the project and return their content."""
-    candidates = [
-        root / "CLAUDE.md",
-        root / ".claude" / "CLAUDE.md",
-    ]
+    candidates = [root / "CLAUDE.md", root / ".claude" / "CLAUDE.md"]
     parts = []
     for path in candidates:
         if path.is_file():
@@ -60,13 +99,18 @@ def load_config(root: Path) -> dict:
     user_config = user_claude_dir() / "copilot-router.json"
     config_path = project_config if project_config.exists() else user_config
     if config_path.exists():
-        config.update(json.loads(config_path.read_text()))
+        try:
+            config.update(json.loads(config_path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            pass
     return config
 
 
+# --- Prompt building ---
+
 def read_prompt(args: argparse.Namespace) -> str:
     if args.stdin_prompt:
-        prompt = input() if os.isatty(0) else os.sys.stdin.read()
+        prompt = input() if os.isatty(0) else sys.stdin.read()
     elif args.prompt:
         prompt = args.prompt
     else:
@@ -104,23 +148,44 @@ def wrap_prompt(prompt: str, allow_edits: bool = False, context: str | None = No
     if context:
         parts.append(f"\nProject context:\n{context}\n")
     parts.append(f"\nDelegated task:\n{prompt}")
-
     return "".join(parts)
 
 
-def copilot_command(root: Path, prompt: str, config: dict, allow_edits: bool = False, context: str | None = None) -> list[str]:
+# --- Command building ---
+
+def base_copilot_args(root: Path, config: dict, resume_id: str | None = None) -> list[str]:
     command = ["copilot", "--add-dir", str(root)]
     model = str(config.get("copilotModel", "")).strip()
     if model:
         command.extend(["--model", model])
-    command.extend(["-i", wrap_prompt(prompt, allow_edits=allow_edits, context=context)])
+    if resume_id:
+        command.append(f"--resume={resume_id}")
     return command
+
+
+def build_capture_args(root: Path, prompt_text: str, config: dict,
+                       allow_edits: bool = False, context: str | None = None,
+                       resume_id: str | None = None) -> list[str]:
+    args = base_copilot_args(root, config, resume_id)
+    args.extend([
+        "-p", wrap_prompt(prompt_text, allow_edits=allow_edits, context=context),
+        "--allow-all",
+        "--output-format", "json",
+    ])
+    return args
+
+
+def build_interactive_args(root: Path, prompt_text: str, config: dict,
+                           allow_edits: bool = False, context: str | None = None,
+                           resume_id: str | None = None) -> list[str]:
+    args = base_copilot_args(root, config, resume_id)
+    args.extend(["-i", wrap_prompt(prompt_text, allow_edits=allow_edits, context=context)])
+    return args
 
 
 def terminal_command(copilot_args: list[str], root: Path) -> list[str] | None:
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return None
-
     shell = (
         f"cd {shlex.quote(str(root))} && "
         f"{shlex.join(copilot_args)}; "
@@ -133,7 +198,65 @@ def terminal_command(copilot_args: list[str], root: Path) -> list[str] | None:
     return None
 
 
-def run_capture(capture_args: list[str], root: Path) -> int:
+# --- JSON stream parsing ---
+
+def parse_jsonl_event(line: str) -> dict | None:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+def format_tool_event(event: dict) -> str | None:
+    etype = event.get("type", "")
+    data = event.get("data", {})
+
+    if etype == "assistant.message":
+        tool_requests = data.get("toolRequests", [])
+        if tool_requests:
+            tools = []
+            for tr in tool_requests:
+                name = tr.get("name", "unknown")
+                inp = tr.get("arguments", {})
+                if not isinstance(inp, dict):
+                    inp = {}
+                # Skip internal tools
+                if name in ("report_intent",):
+                    continue
+                # Summarize the tool input
+                if name.lower() == "bash":
+                    detail = inp.get("command", "")[:80]
+                elif name.lower() in ("read", "write", "edit", "glob"):
+                    detail = inp.get("file_path", inp.get("pattern", ""))[:80]
+                elif name.lower() == "grep":
+                    detail = inp.get("pattern", "")[:40]
+                else:
+                    detail = str(inp)[:60]
+                tools.append(f"  {name}: {detail}")
+            return "\n".join(tools) if tools else None
+
+    if etype == "result":
+        session_id = event.get("sessionId") or data.get("sessionId", "?")
+        usage = event.get("usage") or data.get("usage", {})
+        requests = usage.get("premiumRequests", "?")
+        changes = usage.get("codeChanges", {})
+        added = changes.get("linesAdded", 0)
+        removed = changes.get("linesRemoved", 0)
+        files = changes.get("filesModified", [])
+        parts = [f"Session: {session_id}", f"Premium requests: {requests}"]
+        if files:
+            parts.append(f"Files modified: {len(files)} (+{added}/-{removed})")
+        return " | ".join(parts)
+
+    return None
+
+
+# --- Capture mode ---
+
+def run_capture(capture_args: list[str], root: Path, prompt: str) -> int:
     os.chdir(root)
     proc = subprocess.Popen(
         capture_args,
@@ -142,10 +265,14 @@ def run_capture(capture_args: list[str], root: Path) -> int:
         text=True,
     )
 
-    # Stream stderr to show progress while capturing stdout for the result
-    stdout_chunks = []
+    # Save PID for status checks
+    pid = proc.pid
 
-    import selectors
+    stdout_lines = []
+    final_text_parts = []
+    session_id = None
+    log_path = None
+
     sel = selectors.DefaultSelector()
     sel.register(proc.stdout, selectors.EVENT_READ)
     sel.register(proc.stderr, selectors.EVENT_READ)
@@ -159,24 +286,101 @@ def run_capture(capture_args: list[str], root: Path) -> int:
                 open_streams -= 1
                 continue
             if key.fileobj is proc.stdout:
-                stdout_chunks.append(line)
+                stdout_lines.append(line)
+                # Parse JSON events from stdout
+                event = parse_jsonl_event(line)
+                if event:
+                    etype = event.get("type", "")
+                    data = event.get("data", {})
+
+                    # Capture session ID from result
+                    if etype == "result":
+                        session_id = event.get("sessionId") or data.get("sessionId")
+                        if session_id and not log_path:
+                            log_path = session_log_path(session_id)
+
+                    # Capture final text from assistant messages
+                    if etype == "assistant.message":
+                        content = data.get("content", "")
+                        if content and not data.get("toolRequests"):
+                            final_text_parts.append(content)
+
+                    # Log tool events to session log
+                    summary = format_tool_event(event)
+                    if summary:
+                        sys.stderr.write(summary + "\n")
+                        sys.stderr.flush()
+
+                    # Write all events to log file once we have session ID
+                    if log_path:
+                        with open(log_path, "a") as f:
+                            f.write(line)
             else:
-                # Show copilot progress on stderr in real-time
                 sys.stderr.write(line)
                 sys.stderr.flush()
 
     sel.close()
     proc.wait()
 
-    stdout = "".join(stdout_chunks)
-    if stdout:
-        print(stdout, end="")
+    # Save session state
+    if session_id:
+        save_session(session_id, str(root), prompt, pid=None)
+        sys.stderr.write(f"Session: {session_id}\n")
+        sys.stderr.flush()
 
-    if proc.returncode != 0 and not stdout:
+    # Output the final text result (what the user sees)
+    final_text = "\n".join(final_text_parts)
+    if final_text:
+        print(final_text, end="\n")
+    elif not final_text and proc.returncode != 0:
         print(f"Copilot exited with code {proc.returncode} and no output.", file=sys.stderr)
 
     return proc.returncode
 
+
+# --- Status command ---
+
+def run_status(session_id: str) -> int:
+    # Check if process is still running
+    pid_path = session_pid_path(session_id)
+    running = False
+    pid = None
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+            running = True
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+
+    status_label = f"Running (PID {pid})" if running else "Completed"
+    print(f"[{status_label}]")
+
+    # Show last 10 tool events from log
+    log = session_log_path(session_id)
+    if not log.exists():
+        print("No log found for this session.")
+        return 1
+
+    tool_events = []
+    for line in open(log):
+        event = parse_jsonl_event(line)
+        if not event:
+            continue
+        summary = format_tool_event(event)
+        if summary:
+            tool_events.append(summary)
+
+    if not tool_events:
+        print("No tool calls recorded yet.")
+        return 0
+
+    for entry in tool_events[-10:]:
+        print(entry)
+    return 0
+
+
+# --- Main ---
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Launch a delegated Copilot subtask.")
@@ -185,16 +389,24 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print the chosen launch command without executing it.")
     parser.add_argument("--inline", action="store_true", help="Run Copilot in the current terminal.")
     parser.add_argument("--capture-result", action="store_true", help="Run Copilot non-interactively and print only the final result.")
-    parser.add_argument("--allow-edits", action="store_true", help="Allow Copilot to create and edit files (for implementation tasks).")
+    parser.add_argument("--allow-edits", action="store_true", help="Allow Copilot to create and edit files.")
     parser.add_argument("--cwd", help="Override the working directory / project root.")
-    parser.add_argument("--context", help="Extra project context to prepend (tech stack, conventions, etc).")
+    parser.add_argument("--context", help="Extra project context to prepend.")
+    parser.add_argument("--resume", metavar="SESSION_ID", help="Resume an existing session by ID.")
+    parser.add_argument("--status", metavar="SESSION_ID", help="Show last 10 tool calls from a session.")
+    # Legacy flag kept for backward compat with hook
+    parser.add_argument("--from-hook", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    # Status mode — just show log and exit
+    if args.status:
+        return run_status(args.status)
 
     root = project_dir(args.cwd)
     config = load_config(root)
     prompt = read_prompt(args)
 
-    # Build context: CLAUDE.md auto-discovery + explicit --context
+    # Build context
     context_parts = []
     claude_md = load_claude_md(root)
     if claude_md:
@@ -203,31 +415,33 @@ def main() -> int:
         context_parts.append(args.context)
     context = "\n\n".join(context_parts) if context_parts else None
 
-    copilot_args = copilot_command(root, prompt, config, allow_edits=args.allow_edits, context=context)
+    resume_id = args.resume
 
+    # Capture mode — non-interactive, JSON output, parse results
     if args.capture_result:
-        capture_args = copilot_args[:]
-        prompt_text = capture_args.pop()
-        capture_args[-1] = "-p"
-        capture_args.extend(
-            [
-                prompt_text,
-                "--allow-all",
-                "--stream",
-                "off",
-                "--output-format",
-                "text",
-                "--silent",
-            ]
+        capture_args = build_capture_args(
+            root, prompt, config,
+            allow_edits=args.allow_edits,
+            context=context,
+            resume_id=resume_id,
         )
         if args.dry_run:
-            print(json.dumps({"cwd": str(root), "copilot_args": capture_args}, indent=2))
+            print(json.dumps({"cwd": str(root), "args": capture_args}, indent=2))
             return 0
-        return run_capture(capture_args, root)
+        return run_capture(capture_args, root, prompt)
 
-    terminal_args = None if args.inline else terminal_command(copilot_args, root)
+    # Interactive / terminal mode
+    interactive_args = build_interactive_args(
+        root, prompt, config,
+        allow_edits=args.allow_edits,
+        context=context,
+        resume_id=resume_id,
+    )
+
+    terminal_args = None if args.inline else terminal_command(interactive_args, root)
+
     if args.dry_run:
-        print(json.dumps({"cwd": str(root), "copilot_args": copilot_args, "terminal_args": terminal_args}, indent=2))
+        print(json.dumps({"cwd": str(root), "args": interactive_args, "terminal": terminal_args}, indent=2))
         return 0
 
     if terminal_args:
@@ -236,7 +450,7 @@ def main() -> int:
         return 0
 
     os.chdir(root)
-    return subprocess.call(copilot_args)
+    return subprocess.call(interactive_args)
 
 
 if __name__ == "__main__":

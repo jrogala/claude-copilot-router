@@ -49,9 +49,10 @@ esac
 mkdir -p "${TARGET_DIR}/hooks" "${TARGET_DIR}/bin"
 
 cp "${ROOT_DIR}/claude/hooks/copilot_router_hook.py" "${TARGET_DIR}/hooks/copilot_router_hook.py"
+cp "${ROOT_DIR}/claude/hooks/copilot_escalation_hook.py" "${TARGET_DIR}/hooks/copilot_escalation_hook.py"
 cp "${ROOT_DIR}/claude/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-subtask"
 cp "${ROOT_DIR}/claude/bin/copilot-router-mode" "${TARGET_DIR}/bin/copilot-router-mode"
-chmod +x "${TARGET_DIR}/hooks/copilot_router_hook.py" "${TARGET_DIR}/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-router-mode"
+chmod +x "${TARGET_DIR}/hooks/copilot_router_hook.py" "${TARGET_DIR}/hooks/copilot_escalation_hook.py" "${TARGET_DIR}/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-router-mode"
 
 export TARGET_DIR MODE MODEL _MODE_SET="${MODE_SET}" _MODEL_SET="${MODEL_SET}"
 python3 <<'PY'
@@ -69,6 +70,8 @@ default_config = {
     "launchStrategy": "capture",
     "copilotModel": os.environ["MODEL"],
     "minPromptLength": 24,
+    "softThreshold": 2,
+    "hardThreshold": 5,
 }
 
 # Merge: keep existing user config, only add missing keys
@@ -108,6 +111,21 @@ hook_entry = {
 
 if hook_entry not in user_prompt_submit:
     user_prompt_submit.append(hook_entry)
+
+post_tool_use = hooks.setdefault("PostToolUse", [])
+post_tool_hook_entry = {
+    "hooks": [
+        {
+            "type": "command",
+            "command": "\"$HOME\"/.claude/hooks/copilot_escalation_hook.py",
+            "timeout": 5,
+            "statusMessage": "Tracking exploration depth",
+        }
+    ]
+}
+
+if post_tool_hook_entry not in post_tool_use:
+    post_tool_use.append(post_tool_hook_entry)
 
 settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 PY

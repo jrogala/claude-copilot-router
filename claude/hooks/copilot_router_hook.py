@@ -14,6 +14,8 @@ DEFAULT_CONFIG = {
     "launchStrategy": "capture",
     "copilotModel": "gpt-5.4",
     "minPromptLength": 24,
+    "softThreshold": 2,
+    "hardThreshold": 5,
 }
 
 # Intent patterns: what kind of work the user wants
@@ -57,6 +59,14 @@ def project_dir(payload: dict) -> Path:
 
 def user_claude_dir() -> Path:
     return Path.home() / ".claude"
+
+
+def escalation_state_path() -> Path:
+    return Path(f"/tmp/copilot-router-escalation-{os.getuid()}.json")
+
+
+def reset_escalation_state() -> None:
+    escalation_state_path().write_text(json.dumps({"count": 0}) + "\n")
 
 
 def config_path(root: Path) -> Path:
@@ -173,6 +183,7 @@ def emit(context: str) -> None:
 
 def main() -> int:
     payload = load_input()
+    reset_escalation_state()
     prompt = payload.get("prompt", "")
     if not prompt.strip():
         return 0
