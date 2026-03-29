@@ -125,9 +125,11 @@ def wrap_prompt(prompt: str, allow_edits: bool = False, context: str | None = No
     if allow_edits:
         preamble = (
             "You are handling a delegated subtask from Claude Code.\n"
+            "You are fully trusted to implement the solution end-to-end. Do not just investigate — apply the fix.\n"
             "You may read, create, and edit files as needed to complete the task.\n"
             "Read existing code first to match the project's style and conventions.\n"
             "Thoroughly explore the relevant codebase to understand context before making changes.\n"
+            "The delegating agent has provided all known context in the prompt below. Use it — do not redo research that is already summarized for you.\n"
         )
     else:
         preamble = (
