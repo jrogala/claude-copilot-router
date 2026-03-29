@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Set the blockInterval for the Copilot escalation block hook."""
+
+import json
+import sys
+from pathlib import Path
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("Usage: copilot-set-block-interval <N>", file=sys.stderr)
+        return 1
+    try:
+        value = int(sys.argv[1])
+        if value < 1:
+            raise ValueError
+    except ValueError:
+        print("Error: N must be a positive integer.", file=sys.stderr)
+        return 1
+
+    config_path = Path.home() / ".claude" / "copilot-router.json"
+    config = {}
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    config["blockInterval"] = value
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+    print(f"blockInterval set to {value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
