@@ -30,10 +30,13 @@ esac
 mkdir -p "${TARGET_DIR}/hooks" "${TARGET_DIR}/bin"
 
 echo "Downloading copilot-router files..."
-curl -fsSL "${BASE_URL}/claude/hooks/copilot_router_hook.py" -o "${TARGET_DIR}/hooks/copilot_router_hook.py"
-curl -fsSL "${BASE_URL}/claude/bin/copilot-subtask"          -o "${TARGET_DIR}/bin/copilot-subtask"
-curl -fsSL "${BASE_URL}/claude/bin/copilot-router-mode"      -o "${TARGET_DIR}/bin/copilot-router-mode"
-chmod +x "${TARGET_DIR}/hooks/copilot_router_hook.py" "${TARGET_DIR}/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-router-mode"
+curl -fsSL "${BASE_URL}/claude/hooks/copilot_router_hook.py"     -o "${TARGET_DIR}/hooks/copilot_router_hook.py"
+curl -fsSL "${BASE_URL}/claude/hooks/copilot_escalation_hook.py" -o "${TARGET_DIR}/hooks/copilot_escalation_hook.py"
+curl -fsSL "${BASE_URL}/claude/hooks/copilot_block_hook.py"      -o "${TARGET_DIR}/hooks/copilot_block_hook.py"
+curl -fsSL "${BASE_URL}/claude/bin/copilot-subtask"              -o "${TARGET_DIR}/bin/copilot-subtask"
+curl -fsSL "${BASE_URL}/claude/bin/copilot-router-mode"          -o "${TARGET_DIR}/bin/copilot-router-mode"
+curl -fsSL "${BASE_URL}/claude/bin/copilot-set-block-interval"   -o "${TARGET_DIR}/bin/copilot-set-block-interval"
+chmod +x "${TARGET_DIR}/hooks/copilot_router_hook.py" "${TARGET_DIR}/hooks/copilot_escalation_hook.py" "${TARGET_DIR}/hooks/copilot_block_hook.py" "${TARGET_DIR}/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-router-mode" "${TARGET_DIR}/bin/copilot-set-block-interval"
 
 export TARGET_DIR MODE MODEL _MODE_SET="${MODE_SET}" _MODEL_SET="${MODEL_SET}"
 python3 <<'PY'
@@ -91,6 +94,36 @@ hook_entry = {
 
 if hook_entry not in user_prompt_submit:
     user_prompt_submit.append(hook_entry)
+
+post_tool_use = hooks.setdefault("PostToolUse", [])
+post_tool_hook_entry = {
+    "hooks": [
+        {
+            "type": "command",
+            "command": "\"$HOME\"/.claude/hooks/copilot_escalation_hook.py",
+            "timeout": 5,
+            "statusMessage": "Tracking exploration depth",
+        }
+    ]
+}
+
+if post_tool_hook_entry not in post_tool_use:
+    post_tool_use.append(post_tool_hook_entry)
+
+pre_tool_use = hooks.setdefault("PreToolUse", [])
+pre_tool_hook_entry = {
+    "hooks": [
+        {
+            "type": "command",
+            "command": "\"$HOME\"/.claude/hooks/copilot_block_hook.py",
+            "timeout": 5,
+            "statusMessage": "Checking exploration depth",
+        }
+    ]
+}
+
+if pre_tool_hook_entry not in pre_tool_use:
+    pre_tool_use.append(pre_tool_hook_entry)
 
 settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 PY

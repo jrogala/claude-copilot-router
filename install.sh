@@ -50,9 +50,11 @@ mkdir -p "${TARGET_DIR}/hooks" "${TARGET_DIR}/bin"
 
 cp "${ROOT_DIR}/claude/hooks/copilot_router_hook.py" "${TARGET_DIR}/hooks/copilot_router_hook.py"
 cp "${ROOT_DIR}/claude/hooks/copilot_escalation_hook.py" "${TARGET_DIR}/hooks/copilot_escalation_hook.py"
+cp "${ROOT_DIR}/claude/hooks/copilot_block_hook.py" "${TARGET_DIR}/hooks/copilot_block_hook.py"
 cp "${ROOT_DIR}/claude/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-subtask"
 cp "${ROOT_DIR}/claude/bin/copilot-router-mode" "${TARGET_DIR}/bin/copilot-router-mode"
-chmod +x "${TARGET_DIR}/hooks/copilot_router_hook.py" "${TARGET_DIR}/hooks/copilot_escalation_hook.py" "${TARGET_DIR}/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-router-mode"
+cp "${ROOT_DIR}/claude/bin/copilot-set-block-interval" "${TARGET_DIR}/bin/copilot-set-block-interval"
+chmod +x "${TARGET_DIR}/hooks/copilot_router_hook.py" "${TARGET_DIR}/hooks/copilot_escalation_hook.py" "${TARGET_DIR}/hooks/copilot_block_hook.py" "${TARGET_DIR}/bin/copilot-subtask" "${TARGET_DIR}/bin/copilot-router-mode" "${TARGET_DIR}/bin/copilot-set-block-interval"
 
 export TARGET_DIR MODE MODEL _MODE_SET="${MODE_SET}" _MODEL_SET="${MODEL_SET}"
 python3 <<'PY'
@@ -126,6 +128,21 @@ post_tool_hook_entry = {
 
 if post_tool_hook_entry not in post_tool_use:
     post_tool_use.append(post_tool_hook_entry)
+
+pre_tool_use = hooks.setdefault("PreToolUse", [])
+pre_tool_hook_entry = {
+    "hooks": [
+        {
+            "type": "command",
+            "command": "\"$HOME\"/.claude/hooks/copilot_block_hook.py",
+            "timeout": 5,
+            "statusMessage": "Checking exploration depth",
+        }
+    ]
+}
+
+if pre_tool_hook_entry not in pre_tool_use:
+    pre_tool_use.append(pre_tool_hook_entry)
 
 settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 PY
