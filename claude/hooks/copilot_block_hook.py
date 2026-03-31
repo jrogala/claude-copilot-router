@@ -41,7 +41,23 @@ def save_state(count: int) -> None:
     STATE_PATH.write_text(json.dumps({"count": count}) + "\n")
 
 
+def is_copilot_call(payload: dict) -> bool:
+    """Detect if this tool call is a delegation to copilot-subtask."""
+    tool = str(payload.get("tool_name", "")).strip().lower()
+    if tool == "bash":
+        command = str(payload.get("tool_input", {}).get("command", ""))
+        return "copilot-subtask" in command
+    return False
+
+
 def main() -> int:
+    raw = sys.stdin.read()
+    payload = json.loads(raw) if raw.strip() else {}
+
+    if is_copilot_call(payload):
+        save_state(0)
+        return 0
+
     block_interval = load_block_interval()
     count = load_state()
     if count > 0 and count % block_interval == 0:

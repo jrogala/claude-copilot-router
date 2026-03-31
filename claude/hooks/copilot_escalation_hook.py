@@ -132,6 +132,15 @@ def is_exploratory_agent(payload: dict) -> bool:
     return agent_type == "explore"
 
 
+def is_copilot_call(payload: dict) -> bool:
+    """Detect if this tool call is a delegation to copilot-subtask."""
+    name = tool_name(payload)
+    if name == "bash":
+        command = str(tool_input(payload).get("command", ""))
+        return "copilot-subtask" in command
+    return False
+
+
 def is_exploratory(payload: dict) -> bool:
     name = tool_name(payload)
     if name in EXPLORATORY_TOOLS:
@@ -178,6 +187,11 @@ def main() -> int:
     config = load_config(root)
     state = load_state()
     count = state["count"]
+    if is_copilot_call(payload):
+        count = 0
+        save_state({"count": count})
+        emit("")
+        return 0
     if is_exploratory(payload):
         count += 1
         save_state({"count": count})
