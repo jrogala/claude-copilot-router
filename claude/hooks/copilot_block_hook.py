@@ -3,6 +3,7 @@
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -26,19 +27,31 @@ def load_block_interval() -> int:
     return DEFAULT_BLOCK_INTERVAL
 
 
-def load_state() -> int:
+def launcher_path() -> Path:
+    root = Path(os.environ.get("CLAUDE_PROJECT_DIR", ".")).resolve()
+    project_launcher = root / ".claude" / "bin" / "copilot-subtask"
+    if project_launcher.exists():
+        return project_launcher
+    return Path.home() / ".claude" / "bin" / "copilot-subtask"
+
+
+def load_state() -> dict:
     if not STATE_PATH.exists():
-        return 0
+        return {"count": 0, "locked": False}
     try:
         state = json.loads(STATE_PATH.read_text())
         count = state.get("count", 0)
-        return count if isinstance(count, int) and count >= 0 else 0
+        locked = state.get("locked", False)
+        return {
+            "count": count if isinstance(count, int) and count >= 0 else 0,
+            "locked": bool(locked),
+        }
     except (json.JSONDecodeError, OSError):
-        return 0
+        return {"count": 0, "locked": False}
 
 
-def save_state(count: int) -> None:
-    STATE_PATH.write_text(json.dumps({"count": count}) + "\n")
+def save_state(state: dict) -> None:
+    STATE_PATH.write_text(json.dumps(state) + "\n")
 
 
 def is_copilot_call(payload: dict) -> bool:
@@ -55,27 +68,61 @@ def main() -> int:
     payload = json.loads(raw) if raw.strip() else {}
 
     if is_copilot_call(payload):
-        save_state(0)
+        save_state({"count": 0, "locked": False})
         return 0
 
-    block_interval = load_block_interval()
-    count = load_state()
-    if count > 0 and count % block_interval == 0:
-        # Bump past the boundary so subsequent calls are not blocked
-        save_state(count + 1)
+    state = load_state()
+    count = state["count"]
+    locked = state["locked"]
+
+    # If locked, block everything until copilot-subtask is called
+    if locked:
+        launcher = launcher_path()
         print(
             json.dumps(
                 {
                     "decision": "block",
-                    "reason": (
-                        f"Blocked: {count} exploratory tool calls since last user message. "
-                        "Delegate to Copilot via copilot-subtask instead of continuing manually."
-                    ),
+                    "reason": build_block_message(count, launcher),
+                }
+            )
+        )
+        return 1
+
+    # Check if we've hit the block interval threshold
+    block_interval = load_block_interval()
+    if count > 0 and count % block_interval == 0:
+        launcher = launcher_path()
+        # Enter locked state — ALL tools blocked until copilot-subtask
+        save_state({"count": count, "locked": True})
+        print(
+            json.dumps(
+                {
+                    "decision": "block",
+                    "reason": build_block_message(count, launcher),
                 }
             )
         )
         return 1
     return 0
+
+
+def build_block_message(count: int, launcher: Path) -> str:
+    return (
+        f"BLOCKED: {count} exploratory tool calls since the last user message. "
+        "ALL tools are now locked until you delegate to Copilot.\n\n"
+        "Your ONLY allowed action is a Bash call to copilot-subtask. "
+        "Every other tool (Read, Grep, Glob, Agent, EnterWorktree, etc.) will be rejected.\n\n"
+        "BEFORE delegating, think about what the subtask needs to succeed:\n"
+        "- copilot-subtask is AUTONOMOUS — it cannot ask you questions or wait for input.\n"
+        "- Include ALL context it needs: file paths, error messages, what you've already tried.\n"
+        "- If the task requires credentials, SSH access, user decisions, or any interactive step, "
+        "ASK THE USER FIRST (via text output) before running copilot-subtask.\n"
+        "- Write the prompt as WHY not HOW — describe the goal and constraints.\n\n"
+        "Command:\n"
+        f"  {launcher} --prompt \"<your detailed task description>\" --capture-result\n\n"
+        "Add --allow-edits for implementation. Add --cwd <path> to target a specific directory.\n"
+        "The lock lifts after a successful copilot-subtask call."
+    )
 
 
 if __name__ == "__main__":

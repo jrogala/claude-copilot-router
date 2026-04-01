@@ -53,6 +53,13 @@ def config_path(root: Path) -> Path:
     return user_claude_dir() / "copilot-router.json"
 
 
+def launcher_path(root: Path) -> Path:
+    project_launcher = root / ".claude" / "bin" / "copilot-subtask"
+    if project_launcher.exists():
+        return project_launcher
+    return user_claude_dir() / "bin" / "copilot-subtask"
+
+
 def load_config(root: Path) -> dict:
     config = dict(DEFAULT_CONFIG)
     path = config_path(root)
@@ -71,15 +78,19 @@ def state_path() -> Path:
 def load_state() -> dict:
     path = state_path()
     if not path.exists():
-        return {"count": 0}
+        return {"count": 0, "locked": False}
     try:
         state = json.loads(path.read_text())
     except json.JSONDecodeError:
-        return {"count": 0}
+        return {"count": 0, "locked": False}
     if not isinstance(state, dict):
-        return {"count": 0}
+        return {"count": 0, "locked": False}
     count = state.get("count", 0)
-    return {"count": count if isinstance(count, int) and count >= 0 else 0}
+    locked = state.get("locked", False)
+    return {
+        "count": count if isinstance(count, int) and count >= 0 else 0,
+        "locked": bool(locked),
+    }
 
 
 def save_state(state: dict) -> None:
@@ -152,13 +163,18 @@ def is_exploratory(payload: dict) -> bool:
     return False
 
 
-def build_context(count: int, config: dict) -> str:
+def build_context(count: int, config: dict, root: Path) -> str:
     hard_threshold = int(config.get("hardThreshold", DEFAULT_CONFIG["hardThreshold"]))
     soft_threshold = int(config.get("softThreshold", DEFAULT_CONFIG["softThreshold"]))
     if count >= hard_threshold:
+        launcher = launcher_path(root)
+        command = f'{shlex.quote(str(launcher))} "delegate the current task to Copilot"'
         return (
             f"Copilot escalation: you've made {count} exploratory tool calls since the last user message. "
-            "Stop expanding the exploration loop and delegate the broader investigation to Copilot now."
+            "Hard threshold reached. Stop exploring and use Bash to delegate to Copilot now. "
+            f"Resolved launcher: {launcher}. "
+            f"Command example: {command}. "
+            "A successful copilot-subtask call resets the counter."
         )
     if count >= soft_threshold:
         return (
@@ -188,14 +204,13 @@ def main() -> int:
     state = load_state()
     count = state["count"]
     if is_copilot_call(payload):
-        count = 0
-        save_state({"count": count})
+        save_state({"count": 0, "locked": False})
         emit("")
         return 0
     if is_exploratory(payload):
         count += 1
-        save_state({"count": count})
-    emit(build_context(count, config))
+        save_state({"count": count, "locked": state.get("locked", False)})
+    emit(build_context(count, config, root))
     return 0
 
 

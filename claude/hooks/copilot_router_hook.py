@@ -66,7 +66,7 @@ def escalation_state_path() -> Path:
 
 
 def reset_escalation_state() -> None:
-    escalation_state_path().write_text(json.dumps({"count": 0}) + "\n")
+    escalation_state_path().write_text(json.dumps({"count": 0, "locked": False}) + "\n")
 
 
 def config_path(root: Path) -> Path:
