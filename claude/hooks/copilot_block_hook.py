@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 STATE_PATH = Path(f"/tmp/copilot-router-escalation-{os.getuid()}.json")
-DEFAULT_BLOCK_INTERVAL = 3
+DEFAULT_BLOCK_INTERVAL = 10
 
 
 def load_block_interval() -> int:
