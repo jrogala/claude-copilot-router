@@ -20,6 +20,7 @@ DEFAULT_CONFIG = {
     "minPromptLength": 24,
     "softThreshold": 2,
     "hardThreshold": 5,
+    "summaryInterval": 10,
 }
 
 TERMINALS = [
@@ -121,7 +122,8 @@ def read_prompt(args: argparse.Namespace) -> str:
     return prompt
 
 
-def wrap_prompt(prompt: str, allow_edits: bool = False, context: str | None = None) -> str:
+def wrap_prompt(prompt: str, allow_edits: bool = False, context: str | None = None,
+                summary_interval: int = 0) -> str:
     if allow_edits:
         preamble = (
             "You are handling a delegated subtask from Claude Code.\n"
@@ -147,6 +149,14 @@ def wrap_prompt(prompt: str, allow_edits: bool = False, context: str | None = No
     )
 
     parts = [preamble, response_guide]
+    if summary_interval and summary_interval > 0:
+        parts.append(
+            f"\nProgress reporting:\n"
+            f"Roughly every ~{summary_interval} tool calls, emit a single one-line progress summary as a plain assistant message "
+            f"(what you just finished + what you're doing next). Keep it to one short sentence, prefixed with 'PROGRESS:'. "
+            f"Approximate cadence is fine — do not count exactly. These summaries surface back to the delegating agent so it "
+            f"can stay aware of your progress.\n"
+        )
     if context:
         parts.append(f"\nProject context:\n{context}\n")
     parts.append(f"\nDelegated task:\n{prompt}")
@@ -170,7 +180,8 @@ def build_capture_args(root: Path, prompt_text: str, config: dict,
                        resume_id: str | None = None) -> list[str]:
     args = base_copilot_args(root, config, resume_id)
     args.extend([
-        "-p", wrap_prompt(prompt_text, allow_edits=allow_edits, context=context),
+        "-p", wrap_prompt(prompt_text, allow_edits=allow_edits, context=context,
+                          summary_interval=int(config.get("summaryInterval", 0) or 0)),
         "--allow-all",
         "--output-format", "json",
     ])
@@ -181,7 +192,8 @@ def build_interactive_args(root: Path, prompt_text: str, config: dict,
                            allow_edits: bool = False, context: str | None = None,
                            resume_id: str | None = None) -> list[str]:
     args = base_copilot_args(root, config, resume_id)
-    args.extend(["-i", wrap_prompt(prompt_text, allow_edits=allow_edits, context=context)])
+    args.extend(["-i", wrap_prompt(prompt_text, allow_edits=allow_edits, context=context,
+                                   summary_interval=int(config.get("summaryInterval", 0) or 0))])
     return args
 
 
