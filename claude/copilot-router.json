@@ -3,5 +3,6 @@
   "blockOnAutoRoute": true,
   "launchStrategy": "capture",
   "copilotModel": "gpt-5.4",
-  "minPromptLength": 24
+  "minPromptLength": 24,
+  "summaryInterval": 10
 }
