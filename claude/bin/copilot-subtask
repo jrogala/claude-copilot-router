@@ -146,16 +146,18 @@ def wrap_prompt(prompt: str, allow_edits: bool = False, context: str | None = No
         "- For exploration: at most 5 short bullets or a short paragraph with findings.\n"
         "- For implementation: list the files you created/modified and a brief summary of changes.\n"
         "Do not dump full file trees or large code blocks in your response.\n"
+        "Do NOT recursively invoke copilot-subtask, the copilot CLI, or any delegation bridge — you ARE the delegated subtask.\n"
     )
 
     parts = [preamble, response_guide]
     if summary_interval and summary_interval > 0:
         parts.append(
-            f"\nProgress reporting:\n"
-            f"Roughly every ~{summary_interval} tool calls, emit a single one-line progress summary as a plain assistant message "
-            f"(what you just finished + what you're doing next). Keep it to one short sentence, prefixed with 'PROGRESS:'. "
-            f"Approximate cadence is fine — do not count exactly. These summaries surface back to the delegating agent so it "
-            f"can stay aware of your progress.\n"
+            f"\nProgress reporting (MANDATORY):\n"
+            f"Roughly every ~{summary_interval} tool calls, run a bash tool call of the form:\n"
+            f"    echo 'PROGRESS: <one short sentence: what you just finished + what you are doing next>'\n"
+            f"This MUST be a real bash tool call (not narration, not a plain message). It is how the delegating agent "
+            f"observes your progress mid-run. Keep the sentence short. Approximate cadence is fine — do not count exactly. "
+            f"Emit your first PROGRESS line after roughly the first {summary_interval} tool calls, and continue at that cadence.\n"
         )
     if context:
         parts.append(f"\nProject context:\n{context}\n")
@@ -242,7 +244,11 @@ def format_tool_event(event: dict) -> str | None:
                     continue
                 # Summarize the tool input
                 if name.lower() == "bash":
-                    detail = inp.get("command", "")[:80]
+                    command = inp.get("command", "")
+                    if "PROGRESS:" in command:
+                        detail = command
+                    else:
+                        detail = command[:80]
                 elif name.lower() in ("read", "write", "edit", "glob"):
                     detail = inp.get("file_path", inp.get("pattern", ""))[:80]
                 elif name.lower() == "grep":
